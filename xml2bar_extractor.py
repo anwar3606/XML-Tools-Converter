@@ -1,40 +1,80 @@
+import argparse
 import json
 import os
 import sys
 import time
 import multiprocessing
+
+import re
+
 try:
     from collections import OrderedDict
 except ImportError:
     from ordereddict import OrderedDict
 from lxml import etree
 
+parser = argparse.ArgumentParser(
+    description='This script is used for converting a xml file into character delimited file like csv.')
+parser.add_argument(
+    'input_file', help='The input xml file that needed to parsed. Ex: data.xml', type=str)
+parser.add_argument(
+    'template_file', help='This file have to contains all the extraction logic in a JSON file.  Ex: abc.json', type=str)
+parser.add_argument(
+    'output_file', help='The output file location. Ex: abc.csv', type=str)
+parser.add_argument('delimiter',
+                    type=str,
+                    help='Delimiter character that will be used to delimit values. (Default = |) Ex: | or ,',
+                    default='|')
+parser.add_argument('wrapper_tag', help='This tag will used to wrap the whole xml output file.', type=str)
+parser.add_argument('is_multiprocessing',
+                    help='Parallel processing of the xml elements. Will result in unordered result. (Default=True)',
+                    type=bool,
+                    default=True)
+parser.add_argument('is_multiprocessing',
+                    help='Parallel processing of the xml elements. Will result in unordered result. (Default=True)',
+                    type=bool,
+                    default=True)
+parser.add_argument('whole_element',
+                    help='If True, the whole element tag will be outputted, instead of just the tag that is defined in the template file. ',
+                    type=bool,
+                    default=False)
+args = parser.parse_args()
+
 
 def validate_arguments():
-    if len(sys.argv) < 4:
-        print_help()
-    if not os.path.isfile(sys.argv[1]):
+    input_file = args.input_file
+    template_file = args.template_file
+    output_file = args.output_file
+    delimiter = args.delimiter
+    is_multiprocessing = args.is_multiprocessing
+    wrapper_tag = args.wrapper_tag
+    is_whole_element = args.whole_element
+
+    if not os.path.isabs(args.input_file):
+        input_file = os.path.realpath('.') + os.path.sep + args.input_file
+
+    if not os.path.isfile(input_file):
         sys.stderr.write("ERROR: The input file '" +
-                         sys.argv[1] + "' does not exist!\n")
+                         input_file + "' does not exist!\n")
         sys.exit(1)
-    if not os.path.isfile(sys.argv[2]):
+
+    if not os.path.isabs(args.template_file):
+        template_file = os.path.realpath('.') + os.path.sep + args.template_file
+
+    if not os.path.isfile(template_file):
         sys.stderr.write("ERROR: The template file '" +
-                         sys.argv[1] + "' does not exist!\n")
-        sys.exit(1)
-    if not os.path.exists(os.path.dirname(sys.argv[3])):
-        sys.stderr.write("ERROR: The output file path '" +
-                         os.path.dirname(sys.argv[3]) + "' does not exist!\n")
+                         template_file + "' does not exist!\n")
         sys.exit(1)
 
+    if not os.path.isabs(args.output_file):
+        output_file = os.path.realpath('.') + os.path.sep + args.output_file
 
-def print_help():
-    sys.stderr.write("ERROR: Missing Arguments!\n")
-    sys.stdout.writelines("""This program takes 3 arguments.
-Example: xml2bar_parser.py input_file template_file output_file
-    input_file      = The XML file that needed to be parsed.
-    template_file   = The JSON file that will be used to create the bar delimited file.
-    output_file     = Name of the output bar delimited file.\n""")
-    sys.exit(1)
+    if not os.path.exists(os.path.dirname(output_file)):
+        sys.stdout.write("WARNING: The output directory '" +
+                         os.path.dirname(output_file) + "' does not exist!\nCreating directories...")
+        os.makedirs(output_file)
+
+    return (input_file, template_file, output_file, delimiter, is_multiprocessing, wrapper_tag, is_whole_element)
 
 
 def write_line(line_no, element, values_to_write):
@@ -53,7 +93,7 @@ def write_line(line_no, element, values_to_write):
     return text
 
 
-def process_element(elem, path):
+def process_element(elem, path, is_whole_element):
     output_line = ""
     if isinstance(elem, list):
         for sub_elem in elem:
@@ -65,79 +105,66 @@ def process_element(elem, path):
             elif isinstance(val, dict):
                 temp_elem = elem.xpath(key)
                 output_line = output_line + process_element(temp_elem, val)
-    return output_line
+            if (is_whole_element and output_line):
+                break;
+    return output_file;
 
 
 def start_processing_element(params):
-    elem_string, d = params
-    # elem_string = re.sub(r"xmlns=\".*?\"", "", elem_string)
+    elem_string, d, is_whole_element = params
+    elem_string = re.sub(r"xmlns=\".*?\"", "", elem_string)
     tree = etree.fromstring(elem_string)
-    etree.cleanup_namespaces(tree)
-    return process_element(tree, d)
+    result = process_element(tree, d, is_whole_element)
+    if (is_whole_element and result):
+        return elem_string
+    else:
+        return result
 
 
-def element_generator(input_file):
-    try:
-        with open(sys.argv[2]) as template_file:
-            template = json.loads(template_file.read(), object_pairs_hook=OrderedDict)
-    except Exception as e:
-        sys.stderr.write("ERROR: Invalid JSON template file! " + e.message + "\n")
-        sys.exit()
-
-    root_tag = next(iter(template))
+def element_generator(input_file, template, root_tag, is_whole_element):
     root_tag_with_namespace = "{*}" + root_tag
     for event, elem in etree.iterparse(input_file, tag=root_tag_with_namespace):
-        yield (etree.tostring(elem), template.get(root_tag))
+        yield (etree.tostring(elem), template.get(root_tag), is_whole_element)
         elem.clear()
-
-
-def blocks(files, size=65536):
-    while True:
-        b = files.read(size)
-        if not b:
-            break
-        yield b
 
 
 if __name__ == '__main__':
     start_time = time.time()
-    validate_arguments()
-    f = open(sys.argv[3], 'w+')
-    p = multiprocessing.Pool()
+    input_file, template_file, output_file, delimiter, is_multiprocessing, wrapper_tag, is_whole_element = validate_arguments()
     counter = 0
-    f.write("<statementProduction>\n")
-    for result in p.imap_unordered(start_processing_element, element_generator(sys.argv[1]), chunksize=100):
-        if (result):
-            f.write("<envelop>\n")
-            f.write(result + str("\n"))
-            f.write("</envelop>\n")
+
+    try:
+        with open(args.template_file) as template_file:
+            template = json.loads(template_file.read(), object_pairs_hook=OrderedDict)
+    except Exception as e:
+        sys.stderr.write("ERROR: Invalid JSON template file! " + e.message + "\n")
+        sys.exit(1)
+
+    root_tag = next(iter(template))
+
+    f = open(output_file, 'w+')
+    f.writelines(wrapper_tag)
+    p = multiprocessing.Pool()
+    if is_multiprocessing:
+        try:
+            for result in p.imap_unordered(start_processing_element,
+                                           element_generator(input_file, template, root_tag, is_whole_element),
+                                           chunksize=100):
+                if (result and not is_whole_element):
+                    f.write("<" + root_tag + ">\n")
+                    f.write(result + str("\n"))
+                    f.write("</" + root_tag + ">\n")
+                else:
+                    f.write(result)
+                counter += 1
+            f.writelines(wrapper_tag)
+        finally:
+            p.close()
+            p.join()
+    else:
+        for elem in element_generator(input_file):
+            f.write(start_processing_element(elem))
             counter += 1
-    f.writelines("</statementProduction>\n")
 
     sys.stdout.writelines("Total Account Extracted: " + str(counter))
-    # f.write("--------------" + str(counter) + "------------\n")
-
-    # counter = 0
-    # for event, elem in etree.iterparse('data.xml', tag="{*}envelope"):
-    #     f.write(start_processing_element((etree.tostring(elem), d)))
-    #     counter +=1
-    #     f.write("--------------"+str(counter)+"------------\n")
-    #     elem.clear()
-    #
-    # print "Counted: ",counter
-
-    # elem_counter = 0
-    # file_counter = 0
-    # f = open(sys.argv[3], 'w+')
-    # for event, elem in etree.iterparse('data.xml', tag="{*}envelope"):
-    #     f.write(re.sub(r"xmlns=\".*?\"", "", etree.tostring(elem)))
-    #     if elem_counter > 500:
-    #         elem_counter = 0
-    #         file_counter += 1
-    #         f.write("</statementProduction>")
-    #         f = open("parts/data"+str(file_counter)+".xml", 'w+')
-    #         f.write("<statementProduction>")
-    #     elem_counter += 1
-    #     elem.clear()
-
     print("\n--- %s seconds ---" % (time.time() - start_time))
